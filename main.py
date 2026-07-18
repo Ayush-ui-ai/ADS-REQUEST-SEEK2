@@ -32,7 +32,7 @@ DB_PATH = "bot_data.db"
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('CREATE TABLE IF NOT EXISTS owner (user_id INTEGER PRIMARY KEY)')
+        await db.execute('CREATE TABLE IF NOT EXISTS owners (user_id INTEGER PRIMARY KEY)')
         await db.execute('CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY, username TEXT)')
         await db.execute('''
             CREATE TABLE IF NOT EXISTS accounts (
@@ -52,21 +52,30 @@ async def init_db():
         ''')
         await db.commit()
 
-async def get_owner():
+async def get_owners():
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute('SELECT user_id FROM owner')
-        row = await cursor.fetchone()
-        return row[0] if row else None
+        cursor = await db.execute('SELECT user_id FROM owners')
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows] if rows else []
 
-async def set_owner(user_id: int):
+async def is_owner(user_id: int) -> bool:
+    owners = await get_owners()
+    return user_id in owners
+
+async def add_owner(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('DELETE FROM owner')
-        await db.execute('INSERT INTO owner (user_id) VALUES (?)', (user_id,))
+        await db.execute('INSERT OR IGNORE INTO owners (user_id) VALUES (?)', (user_id,))
         await db.commit()
+        logger.info(f"Owner added: {user_id}")
+
+async def remove_owner(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('DELETE FROM owners WHERE user_id = ?', (user_id,))
+        await db.commit()
+        logger.info(f"Owner removed: {user_id}")
 
 async def is_authorized(user_id: int) -> bool:
-    owner = await get_owner()
-    if user_id == owner:
+    if await is_owner(user_id):
         return True
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute('SELECT 1 FROM admins WHERE user_id = ?', (user_id,))
@@ -278,10 +287,10 @@ class AccountManager:
             await c.disconnect()
 
 # ---------- BOT CONFIG ----------
-BOT_TOKEN = "8342857987:AAFKqg-9Tk1Lb9DQvflMi16zcCLehcsT6OY"   # CHANGE
-API_ID = 35598561
-API_HASH = "8f359688b1c446a45023045d9656ea37"
-OWNER_ID = 6871652449
+BOT_TOKEN = "8663763583:AAFBuGDqldhCx1YhY94od9ga-jXgW7edCOY"   # CHANGE
+API_ID = 35992936
+API_HASH = "3af1b42e13d465518d2f474289961c2c"
+OWNER_ID = 6871652449  # Initial owner – you can add more later
 
 account_manager = AccountManager(API_ID, API_HASH)
 
@@ -317,14 +326,9 @@ def authorized_only(func):
 def owner_only(func):
     async def wrapper(update, context):
         uid = update.effective_user.id
-        owner = await get_owner()
-        if owner is None:
-            await set_owner(uid)
-            logger.info(f"First user {uid} set as owner automatically.")
-            owner = uid
-        if uid == owner:
+        if await is_owner(uid):
             return await func(update, context)
-        await update.message.reply_text("⛔ Only the bot owner can use this command.")
+        await update.message.reply_text("⛔ Only owners can use this command.")
         return
     return wrapper
 
@@ -390,31 +394,38 @@ async def process_queue():
                 pass
     is_processing = False
 
-# ---------- START ----------
+# ---------- START WITH IMAGE ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await get_owner():
-        await set_owner(OWNER_ID)
+    # Set initial owner if no owners exist
+    owners = await get_owners()
+    if not owners:
+        await add_owner(OWNER_ID)
         await add_admin(OWNER_ID, "Owner")
-        logger.info(f"Owner set to {OWNER_ID}")
+        logger.info(f"Initial owner set to {OWNER_ID}")
 
-    # Optional image – change URL or remove this block
+    # Send image (change the URL to your own image)
+    image_url = "https://i.ibb.co/Lhq8TGRh/IMG-20260604-113856-990.jpg"  # Replace with your image URL
     try:
-        image_url = "https://i.ibb.co/CsW55f0G/IMG-20260604-113856-990.jpg"
-        await update.message.reply_photo(photo=image_url, caption=" ****", parse_mode="Markdown")
-    except Exception:
-        pass  # ignore if image fails
+        await update.message.reply_photo(
+            photo=image_url,
+            caption=" ****",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.warning(f"Image send failed: {e}")
+        await update.message.reply_text(" ****", parse_mode="Markdown")
 
+    # Show menu if authorized
     if await is_authorized(update.effective_user.id):
         await main_menu(update, context)
     else:
-        await update.message.reply_text("⛔ Unauthorized. Only owner/admins can use this bot.")
+        await update.message.reply_text("⛔ Unauthorized. Only owners/admins can use this bot.")
 
-# ---------- MAIN MENU (compact) ----------
+# ---------- MAIN MENU ----------
 @authorized_only
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    owner = await get_owner()
-    is_owner = (uid == owner)
+    is_own = await is_owner(uid)
     active = await account_manager.get_active_sessions()
     admins = await list_admins()
     admin_count = len(admins)
@@ -426,9 +437,11 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Admins: `{admin_count}`\n"
         f"• Developer: `BLAZY NXT`"
     )
-    if is_owner:
+    if is_own:
+        owners = await get_owners()
+        owners_list = "\n".join([f"• `{oid}`" for oid in owners])
         admin_list = "\n".join([f"• `{aid}` ({uname or '?'})" for aid, uname in admins])
-        status += f"\n👑 **Owner Panel**\n{admin_list}\n/addadmin <id> – /rmadmin <id>"
+        status += f"\n👑 **Owners Panel**\n{owners_list}\n**Admins**\n{admin_list}\n/addowner <id> – /rmowner <id>\n/addadmin <id> – /rmadmin <id>"
 
     keyboard = [
         [InlineKeyboardButton("➕ Add New Account", callback_data="add_account")],
@@ -441,8 +454,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📜 Activity Log", callback_data="activity_log")
         ],
         [
-        
-        
             InlineKeyboardButton("💬 Engagement", callback_data="engagement"),
             InlineKeyboardButton("⚡ Start Mass", callback_data="start_mass")
         ]
@@ -616,7 +627,37 @@ async def leave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_text = "\n".join(results)
     await send_long_message(update, full_text)
 
-# ---------- OWNER / ADMIN ----------
+# ---------- OWNER / ADMIN COMMANDS ----------
+@owner_only
+async def add_owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /addowner <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID.")
+        return
+    await add_owner(uid)
+    await update.message.reply_text(f"✅ User {uid} added as owner.")
+
+@owner_only
+async def remove_owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /rmowner <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID.")
+        return
+    owners = await get_owners()
+    if len(owners) <= 1:
+        await update.message.reply_text("❌ Cannot remove the only owner.")
+        return
+    await remove_owner(uid)
+    await update.message.reply_text(f"✅ Owner {uid} removed.")
+
 @owner_only
 async def add_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -625,7 +666,7 @@ async def add_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("❌ Invalid user ID. Must be a number.")
+        await update.message.reply_text("❌ Invalid user ID.")
         return
     uname = context.args[1] if len(context.args) > 1 else None
     await add_admin(uid, uname)
@@ -639,18 +680,19 @@ async def remove_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         uid = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("❌ Invalid user ID. Must be a number.")
+        await update.message.reply_text("❌ Invalid user ID.")
         return
     await remove_admin(uid)
     await update.message.reply_text(f"✅ Admin {uid} removed.")
 
 @owner_only
-async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    owner = await get_owner()
-    if owner:
-        await update.message.reply_text(f"👑 Owner ID: `{owner}`", parse_mode="Markdown")
+async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    owners = await get_owners()
+    if owners:
+        txt = "👑 **Owners**\n" + "\n".join([f"• `{oid}`" for oid in owners])
     else:
-        await update.message.reply_text("No owner set yet. Use /start to set.")
+        txt = "No owners set."
+    await update.message.reply_text(txt, parse_mode="Markdown")
 
 # ---------- BOT SETUP ----------
 async def setup_bot():
@@ -681,13 +723,12 @@ async def setup_bot():
     app.add_handler(add_conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("leave", leave_command))
+    app.add_handler(CommandHandler("addowner", add_owner_command))
+    app.add_handler(CommandHandler("rmowner", remove_owner_command))
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("rmadmin", remove_admin_command))
-    app.add_handler(CommandHandler("owner", owner_command))
+    app.add_handler(CommandHandler("owners", owners_command))
     app.add_handler(CallbackQueryHandler(button_handler))
-
-    # NO FALLBACK HANDLER – bot will ignore non-command, non-conversation messages.
-    # This prevents duplicate messages and keeps UI clean.
 
     return app
 
